@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # 1. Твой Python бэкенд (FastAPI + Whisper)
+  web_backend:
+    build: .
+    container_name: news_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app # Монтируем папку с кодом, чтобы изменения применялись без пересборки
+    environment:
+      - CLOUD_AI_URL=http://172.22.101.3:4000/v1
+    depends_on:
+      - postgres
+      - qdrant
+    restart: unless-stopped
+
+  # 2. Векторная база данных для RAG-поиска по новостям
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: news_qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+  # 3. Реляционная база данных для хранения текстов новостей
+  postgres:
+    image: postgres:15-alpine
+    container_name: news_postgres
+    environment:
+      POSTGRES_USER: news_admin
+      POSTGRES_PASSWORD: secret_password_123
+      POSTGRES_DB: news_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  postgres_data:

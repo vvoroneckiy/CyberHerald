@@ -1,135 +1,152 @@
+import asyncio
 import os
 import shutil
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-# Импортируем наши локальные сервисы
-from cloud_ai_service import CloudAIService, NewsArticle
+from cloud_ai_service import CloudAIService, NewsArticle, SearchResponse, Block
 from voice_service import VoiceService
 from database import init_db, get_db, DBNewsArticle
+from qdrant_service import QdrantService
 
 app = FastAPI(
-    title="News AI Assistant API", 
+    title="News AI Assistant API",
     description="Бэкенд новостного ИИ-ассистента с голосовым вводом и RAG-архитектурой",
-    version="1.0"
+    version="2.0",
 )
 
-# НАСТРОЙКА CORS: Чтобы фронтенд мог слать запросы на сервер из браузера
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # В продакшене лучше указать конкретный домен фронта
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Инициализируем сервисы ИИ и Голоса
 ai_service = CloudAIService()
 voice_service = VoiceService()
-
-# Схема ответа для фронтенда на голосовой запрос
-class SearchResponse(BaseModel):
-    user_text: str = Field(..., description="Распознанный текст из аудио через Whisper")
-    ai_answer: str = Field(..., description="Сгенерированный ответ от облачной LLM")
-    sources: list[str] = Field(..., description="Список источников/ссылок на новости, использованные в ответе")
+qdrant_service = QdrantService()
 
 
-# Событие старта приложения: автоматически создаем таблицы в Postgres, если их нет
+class NewsCreateRequest(BaseModel):
+    title: str
+    content: str
+    source: str = "Unknown"
+
+
 @app.on_event("startup")
 async def on_startup():
     print("[INFO] Инициализация базы данных PostgreSQL...")
     await init_db()
     print("[INFO] База данных готова к работе!")
 
+    print("[INFO] Инициализация Qdrant...")
+    try:
+        await qdrant_service.ensure_collection()
+        print("[INFO] Qdrant готов к работе!")
+    except Exception as e:
+        print(f"[WARN] Qdrant недоступен при старте: {e}")
+
 
 @app.get("/")
 def read_root():
-    return {"status": "Backend is running", "environment": "Docker Container"}
+    return {"status": "CyberHerald Backend is running", "version": "2.0"}
 
 
-# 1. ЭНДПОИНТ ДЛЯ ЛЕНТЫ НОВОСТЕЙ: ТЕПЕРЬ ТЯНЕТ ИЗ REAL POSTGRES
 @app.get("/api/v1/news", response_model=list[NewsArticle])
 async def get_all_news(db: AsyncSession = Depends(get_db)):
-    """
-    Возвращает список всех сохраненных новостей из базы данных PostgreSQL
-    для отображения в ленте на фронтенде.
-    """
     try:
-        # Делаем асинхронный запрос в Postgres, сортируем по новизне
-        result = await db.execute(select(DBNewsArticle).order_by(DBNewsArticle.created_at.desc()))
-        db_news = result.scalars().all()
-        
-        # FastAPI сам смапит объекты SQLAlchemy в Pydantic-схему NewsArticle
-        return db_news
+        result = await db.execute(
+            select(DBNewsArticle).order_by(DBNewsArticle.created_at.desc())
+        )
+        return result.scalars().all()
     except Exception as e:
         print(f"[ERROR] Ошибка чтения ленты новостей: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера при чтении БД: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# 2. ГЛАВНЫЙ ЭНДПОИНТ: ПРИЕМ АУДИО ФАЙЛА + WHISPER + RAG (POSTGRES) + OLLAMA/QWEN
+@app.post("/api/v1/news/add", response_model=NewsArticle)
+async def add_news(
+    article: NewsCreateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        db_article = DBNewsArticle(
+            title=article.title,
+            content=article.content,
+            source=article.source,
+        )
+        db.add(db_article)
+        await db.commit()
+        await db.refresh(db_article)
+
+        asyncio.create_task(
+            qdrant_service.add_article(
+                db_article.id,
+                article.title,
+                article.content,
+                article.source,
+            )
+        )
+
+        return db_article
+    except Exception as e:
+        print(f"[ERROR] Ошибка добавления новости: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/v1/voice-query", response_model=SearchResponse)
-async def process_voice_query(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
-    """
-    Принимает аудиофайл (.mp3, .wav, .webm) с микрофона пользователя, 
-    распознает его через Whisper, ищет контекст в Postgres и генерирует ответ через облачную LLM.
-    """
+async def process_voice_query(file: UploadFile = File(...)):
     temp_audio_path = f"temp_{file.filename}"
-    
+
     try:
         if not file.filename:
-            raise HTTPException(status_code=400, detail="Файл не передан или имеет пустое имя")
-            
-        # 1. Сохраняем бинарный поток аудио во временный файл на диске контейнера
+            raise HTTPException(status_code=400, detail="Файл не передан")
+
         with open(temp_audio_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-            
-        # 2. Отправляем локальный файл в Whisper для перевода в текст
-        print(f"[INFO] Начинаем распознавание файла через Whisper: {temp_audio_path}")
+
+        print(f"[INFO] Распознавание: {temp_audio_path}")
         recognized_text = voice_service.speech_to_text(temp_audio_path)
-        print(f"[INFO] Whisper успешно распознал: '{recognized_text}'")
-        
-        # Чистим за собой временный файл, чтобы не забивать память докера
+        print(f"[INFO] Распознано: '{recognized_text}'")
+
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
-            
+
         if not recognized_text.strip():
             return SearchResponse(
                 user_text="[Звук не распознан]",
-                ai_answer="Извини, мне не удалось разобрать слова на аудиозаписи. Попробуй сказать четче.",
-                sources=[]
+                blocks=[
+                    Block(type="header", data={"text": "Не удалось распознать речь"}),
+                    Block(
+                        type="text",
+                        data={
+                            "title": "Попробуйте снова",
+                            "content": "Извини, не удалось разобрать слова. Попробуй сказать четче.",
+                            "source": "",
+                        },
+                    ),
+                ],
+                audio_url=None,
             )
-            
-        # 3. Достаем новости из реальной базы данных для контекста RAG
-        # В будущем здесь будет точечный поиск через Qdrant по эмбеддингам, 
-        # а пока берем последние новости из Postgres для передачи в LLM
-        db_result = await db.execute(select(DBNewsArticle).limit(10))
-        db_articles = db_result.scalars().all()
-        
-        # Конвертируем модели БД в объекты NewsArticle для ИИ-сервиса
+
+        print("[INFO] Поиск контекста в Qdrant...")
+        qdrant_results = await qdrant_service.search(recognized_text, limit=5)
         context_articles = [
-            NewsArticle(title=a.title, content=a.content, source=a.source) 
-            for a in db_articles
+            NewsArticle(title=r["title"], content=r["content"], source=r["source"])
+            for r in qdrant_results
         ]
-        
-        # 4. Передаем распознанный текст и реальный контекст в облачную Qwen
-        print("[INFO] Запрос отправлен в Облачную LLM...")
-        ai_answer = ai_service.generate_rag_answer(recognized_text, context_articles)
-        
-        # Собираем уникальные ссылки на источники новостей, которые пошли в контекст
-        sources = list(set([art.source for art in context_articles if art.source]))
-        
-        return SearchResponse(
-            user_text=recognized_text,
-            ai_answer=ai_answer,
-            sources=sources
-        )
-        
+
+        print("[INFO] Генерация ответа...")
+        result = ai_service.generate_rag_answer(recognized_text, context_articles)
+
+        return result
+
     except Exception as e:
-        # Если произошла непредвиденная ошибка, обязательно удаляем временный файл
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
-        print(f"[ERROR] Ошибка в эндпоинте voice-query: {e}")
-        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка бэкенд-сервера: {str(e)}")
+        print(f"[ERROR] voice-query: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

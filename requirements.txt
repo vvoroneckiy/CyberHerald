@@ -1,8 +1,9 @@
 fastapi
 uvicorn
 python-multipart
-openai
 pydantic
 faster-whisper
 sqlalchemy>=2.0.0
 asyncpg
+qdrant-client
+fastembed

@@ -1,9 +1,9 @@
 import asyncio
 import os
 import shutil
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -12,10 +12,32 @@ from voice_service import VoiceService
 from database import init_db, get_db, DBNewsArticle
 from qdrant_service import QdrantService
 
+tags_metadata = [
+    {
+        "name": "System",
+        "description": "Эндпоинты для проверки состояния сервера",
+    },
+    {
+        "name": "News",
+        "description": "Операции с новостями: получение списка и добавление новых статей",
+    },
+    {
+        "name": "Voice",
+        "description": "Голосовой поиск новостей с распознаванием речи и RAG-ответом",
+    },
+]
+
 app = FastAPI(
     title="News AI Assistant API",
     description="Бэкенд новостного ИИ-ассистента с голосовым вводом и RAG-архитектурой",
     version="2.0",
+    contact={
+        "name": "CyberHerald Team",
+        "url": "https://github.com/anomalyco/CyberHerald",
+    },
+    openapi_tags=tags_metadata,
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 app.add_middleware(
@@ -32,9 +54,15 @@ qdrant_service = QdrantService()
 
 
 class NewsCreateRequest(BaseModel):
-    title: str
-    content: str
-    source: str = "Unknown"
+    title: str = Field(
+        ..., description="Заголовок новости", example="Российские учёные совершили прорыв в квантовых вычислениях"
+    )
+    content: str = Field(
+        ..., description="Текст новости", example="Группа исследователей из МГУ представила первый в России 50-кубитный квантовый компьютер..."
+    )
+    source: str = Field(
+        "Unknown", description="Источник новости", example="ТАСС"
+    )
 
 
 @app.on_event("startup")
@@ -51,12 +79,37 @@ async def on_startup():
         print(f"[WARN] Qdrant недоступен при старте: {e}")
 
 
-@app.get("/")
+@app.get(
+    "/",
+    tags=["System"],
+    summary="Проверка статуса сервера",
+    description="Возвращает статус бэкенда и текущую версию API",
+    responses={
+        200: {
+            "description": "Сервер работает",
+            "content": {
+                "application/json": {
+                    "example": {"status": "CyberHerald Backend is running", "version": "2.0"}
+                }
+            },
+        }
+    },
+)
 def read_root():
     return {"status": "CyberHerald Backend is running", "version": "2.0"}
 
 
-@app.get("/api/v1/news", response_model=list[NewsArticle])
+@app.get(
+    "/api/v1/news",
+    response_model=list[NewsArticle],
+    tags=["News"],
+    summary="Получить все новости",
+    description="Возвращает список всех новостей из базы данных, отсортированных по дате создания (сначала новые)",
+    responses={
+        200: {"description": "Список новостей"},
+        500: {"description": "Ошибка сервера при чтении новостей"},
+    },
+)
 async def get_all_news(db: AsyncSession = Depends(get_db)):
     try:
         result = await db.execute(
@@ -68,7 +121,18 @@ async def get_all_news(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v1/news/add", response_model=NewsArticle)
+@app.post(
+    "/api/v1/news/add",
+    response_model=NewsArticle,
+    tags=["News"],
+    summary="Добавить новость",
+    description="Добавляет новую новость в базу данных и асинхронно индексирует её векторное представление в Qdrant для поиска",
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        201: {"description": "Новость успешно добавлена"},
+        500: {"description": "Ошибка сервера при добавлении новости"},
+    },
+)
 async def add_news(
     article: NewsCreateRequest,
     db: AsyncSession = Depends(get_db),
@@ -98,8 +162,19 @@ async def add_news(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v1/voice-query", response_model=SearchResponse)
-async def process_voice_query(file: UploadFile = File(...)):
+@app.post(
+    "/api/v1/voice-query",
+    response_model=SearchResponse,
+    tags=["Voice"],
+    summary="Голосовой поиск новостей",
+    description="Принимает аудиофайл с голосовым запросом, распознаёт речь через Whisper, ищет релевантные новости в Qdrant и формирует RAG-ответ с блоками (текст, графики, факты, источники)",
+    responses={
+        200: {"description": "Успешный ответ на голосовой запрос"},
+        400: {"description": "Файл не передан или пустой"},
+        500: {"description": "Ошибка сервера при обработке голосового запроса"},
+    },
+)
+async def process_voice_query(file: UploadFile = File(..., description="Аудиофайл с голосовым запросом (поддерживаются форматы: wav, mp3, ogg, m4a)")):
     temp_audio_path = f"temp_{file.filename}"
 
     try:

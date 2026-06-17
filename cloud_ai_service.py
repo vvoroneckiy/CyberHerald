@@ -1,24 +1,24 @@
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class NewsArticle(BaseModel):
     model_config = {"from_attributes": True}
 
-    title: str
-    content: str
-    source: Optional[str] = "Unknown"
+    title: str = Field(..., description="Заголовок новости", examples=["Квантовый прорыв в России"])
+    content: str = Field(..., description="Содержание новости", examples=["Группа учёных из МГУ..."])
+    source: Optional[str] = Field("Unknown", description="Источник новости", examples=["ТАСС"])
 
 
 class Block(BaseModel):
-    type: str
-    data: dict
+    type: str = Field(..., description="Тип блока: header, text, chart, facts, sources", examples=["text"])
+    data: dict = Field(..., description="Данные блока в зависимости от типа", examples=[{"title": "Заголовок", "content": "Текст новости", "source": "ТАСС"}])
 
 
 class SearchResponse(BaseModel):
-    user_text: str
-    blocks: list[Block]
-    audio_url: Optional[str] = None
+    user_text: str = Field(..., description="Распознанный текст запроса пользователя", examples=["Что нового в технологиях?"])
+    blocks: list[Block] = Field(..., description="Список блоков с ответом (текст, графики, факты, источники)")
+    audio_url: Optional[str] = Field(None, description="URL сгенерированного аудиоответа (если есть)", examples=[None])
 
 
 class CloudAIService:

@@ -5,7 +5,7 @@ from datetime import datetime
 
 # URL для асинхронного подключения к Postgres в докере
 # Данные пользователя и пароля совпадают с твоим docker-compose.yml
-DATABASE_URL = "postgresql+asyncpg://news_admin:secret_password_123@postgres:5432/news_db"
+DATABASE_URL = "postgresql+asyncpg://news_admin:secret_password_123@localhost:5432/news_db"
 
 # Создаем движок БД
 engine = create_async_engine(DATABASE_URL, echo=True)

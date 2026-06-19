@@ -7,9 +7,9 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 
 
 class QdrantService:
-    def __init__(self, host: str = "qdrant", port: int = 6333):
+    def __init__(self, host: str = "localhost", port: int = 6333):
         self.client = AsyncQdrantClient(host=host, port=port)
-        self.embedder = TextEmbedding(model_name="intfloat/multilingual-e5-small")
+        self.embedder = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
         self.collection_name = "news_embeddings"
         self._executor = ThreadPoolExecutor(max_workers=1)
 
@@ -63,12 +63,13 @@ class QdrantService:
     ) -> list[dict]:
         try:
             vector = await self._embed(query)
-            results = await self.client.search(
+            response = await self.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=vector,
+                query=vector,
                 limit=limit,
+                with_payload=True,
             )
-            return [r.payload for r in results]
+            return [r.payload for r in response.points]
         except Exception as e:
             print(f"[WARN] Qdrant search error: {e}")
             return []

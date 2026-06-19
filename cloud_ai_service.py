@@ -8,6 +8,7 @@ class NewsArticle(BaseModel):
     title: str = Field(..., description="Заголовок новости", examples=["Квантовый прорыв в России"])
     content: str = Field(..., description="Содержание новости", examples=["Группа учёных из МГУ..."])
     source: Optional[str] = Field("Unknown", description="Источник новости", examples=["ТАСС"])
+    url: Optional[str] = Field(None, description="Ссылка на оригинал статьи", examples=["https://tass.ru/..."])
 
 
 class Block(BaseModel):
@@ -28,28 +29,38 @@ class CloudAIService:
             "футболист", "тренер", "стадион", "мяч", "турнир",
         ],
         "политика": [
-            "политика", "выборы", "президент", "правительство",
+            "политика", "политику", "политике", "политикой", "политики",
+            "политический", "политических", "политическом",
+            "выборы", "президент", "правительство",
             "депутат", "госдума", "министр", "партия", "закон",
         ],
         "экономика": [
-            "экономика", "финансы", "бюджет", "инфляция", "биржа",
+            "экономика", "экономику", "экономике", "экономикой",
+            "экономический", "экономических",
+            "финансы", "бюджет", "инфляция", "биржа",
             "валюта", "кризис", "рынок", "нефть", "газ", "курс",
         ],
         "технологии": [
-            "технологии", "it", "компьютер", "искусственный интеллект",
+            "технологии", "технологий", "технологиям", "технологиями",
+            "технологиях", "технология", "технологию", "технологический",
+            "it", "компьютер", "искусственный интеллект",
             "робот", "программирование", "gpt", "нейросеть",
             "инновации", "наука", "изобретение",
         ],
         "погода": [
-            "погода", "температура", "дождь", "снег", "ветер",
+            "погода", "погоду", "погоде", "погодой",
+            "температура", "дождь", "снег", "ветер",
             "климат", "прогноз", "град", "жара",
         ],
         "здоровье": [
-            "здоровье", "болезнь", "лекарство", "врач", "больница",
+            "здоровье", "здоровья", "здоровью", "здоровьем",
+            "болезнь", "лекарство", "врач", "больница",
             "вакцина", "медицина", "вирус", "операция",
         ],
         "культура": [
-            "культура", "кино", "музыка", "выставка", "театр",
+            "культура", "культуру", "культуре", "культурой",
+            "культурный", "культурных", "культурном",
+            "кино", "музыка", "выставка", "театр",
             "фильм", "концерт", "искусство", "книга", "фестиваль",
         ],
     }
@@ -112,13 +123,12 @@ class CloudAIService:
         ]
 
     def generate_rag_answer(
-        self, query: str, context_articles: list[NewsArticle]
+        self, query: str, context_articles: list[NewsArticle], clean_query: Optional[str] = None
     ) -> SearchResponse:
-        topic = self._detect_topic(query)
-        filtered = self._filter_articles(context_articles, topic)
+        topic = self._detect_topic(clean_query or query)
         blocks = []
 
-        if not filtered:
+        if not context_articles:
             blocks.append(
                 Block(type="header", data={"text": "Новостей по вашему запросу не найдено"})
             )
@@ -127,39 +137,39 @@ class CloudAIService:
                     type="text",
                     data={
                         "title": "Попробуйте изменить запрос",
-                        "content": "К сожалению, в нашей базе нет новостей по данной теме. "
-                        "Попробуйте спросить о другом.",
+                        "content": "К сожалению, не удалось найти новости по вашему запросу. Попробуйте спросить о другом.",
                         "source": "",
                     },
                 )
             )
         else:
+            filtered = self._filter_articles(context_articles, topic)
+            articles = filtered if filtered else context_articles[:5]
             topic_name = topic if topic else "все темы"
+            label = f"Новости по теме: {topic_name}" if filtered else f"Новости (похожие на тему: {topic_name})"
             blocks.append(
-                Block(type="header", data={"text": f"Новости по теме: {topic_name}"})
+                Block(type="header", data={"text": label})
             )
 
-            for art in filtered:
-                blocks.append(
-                    Block(
-                        type="text",
-                        data={
-                            "title": art.title,
-                            "content": art.content,
-                            "source": art.source,
-                        },
-                    )
-                )
+            for art in articles:
+                block_data = {
+                    "title": art.title,
+                    "content": art.content,
+                    "source": art.source,
+                }
+                if art.url:
+                    block_data["url"] = art.url
+                blocks.append(Block(type="text", data=block_data))
 
-            chart_data = self._generate_chart_data(filtered)
+            chart_data = self._generate_chart_data(articles)
             if chart_data:
                 blocks.append(Block(type="chart", data=chart_data))
 
-            facts = self._generate_facts(filtered)
+            facts = self._generate_facts(articles)
             if facts:
                 blocks.append(Block(type="facts", data={"items": facts}))
 
-            sources = list(set(art.source for art in filtered if art.source))
+            sources = list(set(art.source for art in articles if art.source))
             if sources:
                 blocks.append(Block(type="sources", data={"items": sources}))
 

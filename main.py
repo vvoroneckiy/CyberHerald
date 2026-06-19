@@ -11,6 +11,7 @@ from cloud_ai_service import CloudAIService, NewsArticle, SearchResponse, Block
 from voice_service import VoiceService
 from database import init_db, get_db, DBNewsArticle
 from qdrant_service import QdrantService
+from web_search_service import WebSearchService, clean_voice_query
 
 tags_metadata = [
     {
@@ -51,6 +52,7 @@ app.add_middleware(
 ai_service = CloudAIService()
 voice_service = VoiceService()
 qdrant_service = QdrantService()
+web_search = WebSearchService()
 
 
 class NewsCreateRequest(BaseModel):
@@ -162,6 +164,22 @@ async def add_news(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get(
+    "/api/v1/news/live",
+    tags=["News"],
+    summary="Получить свежие новости из интернета",
+    description="Ищет актуальные новости через DuckDuckGo по разным темам",
+)
+async def get_live_news():
+    try:
+        topics = ["новости России сегодня последние события", "последние новости в мире 2026", "новости науки и технологий 2026"]
+        results = web_search.search_multi(topics, max_per_query=4)
+        return results[:15]
+    except Exception as e:
+        print(f"[ERROR] Live news: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post(
     "/api/v1/voice-query",
     response_model=SearchResponse,
@@ -208,15 +226,38 @@ async def process_voice_query(file: UploadFile = File(..., description="Ауди
                 audio_url=None,
             )
 
-        print("[INFO] Поиск контекста в Qdrant...")
-        qdrant_results = await qdrant_service.search(recognized_text, limit=5)
-        context_articles = [
-            NewsArticle(title=r["title"], content=r["content"], source=r["source"])
-            for r in qdrant_results
-        ]
+        print("[INFO] Поиск контекста в Qdrant и интернете...")
+        clean_query = clean_voice_query(recognized_text)
+        qdrant_task = qdrant_service.search(clean_query, limit=3)
+        web_task = asyncio.to_thread(web_search.search_voice, clean_query, 5)
+        qdrant_results, web_results = await asyncio.gather(qdrant_task, web_task)
+        print(f"[INFO] Qdrant={len(qdrant_results)}, Web={len(web_results or [])}")
 
+        seen = set()
+        context_articles = []
+
+        # Сначала веб-результаты (они настоящие)
+        for r in (web_results or []):
+            title = r.get("title", "").lower()
+            if title and title not in seen:
+                seen.add(title)
+                context_articles.append(
+                    NewsArticle(title=r["title"], content=r["content"], source=r["source"], url=r.get("url", ""))
+                )
+
+        # Qdrant — только если веб дал меньше 3
+        if len(context_articles) < 3:
+            for r in qdrant_results:
+                title = r.get("title", "").lower()
+                if title and title not in seen:
+                    seen.add(title)
+                    context_articles.append(
+                        NewsArticle(title=r["title"], content=r["content"], source=r["source"])
+                    )
+
+        print(f"[INFO] Итого статей: {len(context_articles)}")
         print("[INFO] Генерация ответа...")
-        result = ai_service.generate_rag_answer(recognized_text, context_articles)
+        result = ai_service.generate_rag_answer(recognized_text, context_articles, clean_query)
 
         return result
 
